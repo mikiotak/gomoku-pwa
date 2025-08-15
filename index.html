@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>五目並べ（Gomoku）— PWA</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0f172a">
+<link rel="apple-touch-icon" href="icon-180.png">
+<style>
+  :root{
+    --bg:#0f172a; --panel:#111827; --accent:#22c55e; --muted:#9ca3af; --line:#334155;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Hiragino Kaku Gothic ProN",Meiryo,sans-serif; background:var(--bg); color:#e5e7eb;}
+  .wrap{max-width:900px; margin:0 auto; padding:16px;}
+  h1{font-size:1.25rem; margin:.25rem 0 .5rem; text-align:center}
+  .controls{display:flex; flex-wrap:wrap; gap:10px; justify-content:center; align-items:center; background:var(--panel); padding:12px; border-radius:12px;}
+  .controls label{display:flex; align-items:center; gap:6px; color:#e5e7eb;}
+  select,button{border:0; border-radius:10px; padding:9px 12px; font-weight:600;}
+  select{background:#1f2937; color:#fff;}
+  button{background:#22c55e; color:#0f172a; cursor:pointer;}
+  button.ghost{background:#1f2937; color:#e5e7eb;}
+  button:disabled{opacity:.6; cursor:not-allowed;}
+  .status{margin:10px 0; text-align:center; color:var(--muted); min-height:1.5em;}
+  .boardwrap{display:flex; justify-content:center;}
+  canvas{width:min(92vw, 640px); height:min(92vw, 640px); background:#e9d5a1; border-radius:12px; box-shadow:0 8px 24px rgba(0,0,0,.2); touch-action:manipulation;}
+  .help{margin-top:10px; color:var(--muted); text-align:center; font-size:.95rem;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>五目並べ（Gomoku）— CPU対戦対応</h1>
+  <div class="controls">
+    <label>モード
+      <select id="mode">
+        <option value="cpu">CPU対戦</option>
+        <option value="pvp">対人（同じ端末）</option>
+      </select>
+    </label>
+    <label id="sideBox">あなたの石
+      <select id="side">
+        <option value="1">黒（先手）</option>
+        <option value="2">白（後手）</option>
+      </select>
+    </label>
+    <button id="start">新しい対局</button>
+    <button id="undo" class="ghost">1手戻す</button>
+    <button id="give" class="ghost">ギブアップ</button>
+  </div>
+  <div id="status" class="status"></div>
+  <div class="boardwrap"><canvas id="cv"></canvas></div>
+  <div class="help">禁手なしのフリールール／15×15／5連で勝ち。CPU戦の「1手戻す」は2手分戻してあなたの手番にします。PWAなので一度開けばオフラインでもOK。</div>
+</div>
+
+<script>
+(() => {
+  const N = 15, WIN = 5;
+  const EMPTY=0, BLACK=1, WHITE=2;
+
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const status = document.getElementById('status');
+  const modeSel = document.getElementById('mode');
+  const sideSel = document.getElementById('side');
+  const sideBox = document.getElementById('sideBox');
+  const btnStart = document.getElementById('start');
+  const btnUndo = document.getElementById('undo');
+  const btnGive = document.getElementById('give');
+
+  let board, turn, over, moves, winLine;
+  let mode = 'cpu';
+  let human = BLACK;
+  let ai = WHITE;
+
+  function reset(){
+    board = Array.from({length:N}, () => Array(N).fill(EMPTY));
+    turn = BLACK;
+    over = false;
+    moves = [];
+    winLine = null;
+    fitCanvas();
+    draw();
+    updateStatus();
+    if (mode==='cpu' && human===WHITE) {
+      aiMove(); // CPU先手
+    }
+  }
+
+  function fitCanvas(){
+    const max = Math.min(window.innerWidth*0.92, 640);
+    const dpr = window.devicePixelRatio || 1;
+    cv.style.width = max + 'px';
+    cv.style.height = max + 'px';
+    cv.width = Math.round(max * dpr);
+    cv.height = Math.round(max * dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    draw();
+  }
+  window.addEventListener('resize', fitCanvas);
+
+  function draw(){
+    const w = parseFloat(getComputedStyle(cv).width);
+    const h = parseFloat(getComputedStyle(cv).height);
+    const pad = 24;
+    ctx.clearRect(0,0,w,h);
+
+    ctx.fillStyle = '#e9d5a1';
+    ctx.fillRect(0,0,w,h);
+
+    const size = Math.min(w,h) - pad*2;
+    const step = size / (N-1);
+    const x0 = (w - size)/2, y0 = (h - size)/2;
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--line') || '#334155';
+    ctx.lineWidth = 1;
+    for(let i=0;i<N;i++){
+      const x = x0 + i*step, y = y0 + i*step;
+      ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x0+size, y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y0+size); ctx.stroke();
+    }
+    const stars = [3,7,11];
+    ctx.fillStyle = '#111827';
+    for(const i of stars) for(const j of stars){
+      const cx = x0 + i*step, cy = y0 + j*step;
+      ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI*2); ctx.fill();
+    }
+
+    for(let y=0;y<N;y++){
+      for(let x=0;x<N;x++){
+        const v = board[y][x];
+        if(v!==EMPTY){
+          const cx = x0 + x*step, cy = y0 + y*step;
+          drawStone(cx, cy, step*0.42, v);
+        }
+      }
+    }
+
+    if(moves.length){
+      const last = moves[moves.length-1];
+      const cx = x0 + last.x*step, cy = y0 + last.y*step;
+      ctx.fillStyle = '#ef4444';
+      ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI*2); ctx.fill();
+    }
+
+    if(winLine){
+      ctx.strokeStyle = '#22c55e';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      const a = winLine[0], b = winLine[winLine.length-1];
+      ctx.moveTo(x0 + a.x*step, y0 + a.y*step);
+      ctx.lineTo(x0 + b.x*step, y0 + b.y*step);
+      ctx.stroke();
+    }
+  }
+
+  function drawStone(cx, cy, r, color){
+    const grad = ctx.createRadialGradient(cx-r*0.4, cy-r*0.4, r*0.2, cx, cy, r);
+    if(color===BLACK){
+      grad.addColorStop(0, '#555');
+      grad.addColorStop(1, '#111');
+    } else {
+      grad.addColorStop(0, '#fff');
+      grad.addColorStop(1, '#cbd5e1');
+    }
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,.25)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  function xyFromEvent(ev){
+    const rect = cv.getBoundingClientRect();
+    const w = parseFloat(getComputedStyle(cv).width);
+    const h = parseFloat(getComputedStyle(cv).height);
+    const pad = 24, size = Math.min(w,h)-pad*2;
+    const step = size/(N-1);
+    const x0 = (w-size)/2, y0 = (h-size)/2;
+    const clientX = ev.touches ? ev.touches[0].clientX : ev.clientX;
+    const clientY = ev.touches ? ev.touches[0].clientY : ev.clientY;
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
+    const gx = Math.round((px - x0)/step);
+    const gy = Math.round((py - y0)/step);
+    if(gx<0||gx>=N||gy<0||gy>=N) return null;
+    return {x:gx, y:gy};
+  }
+
+  cv.addEventListener('click', onPlace);
+  cv.addEventListener('touchstart', (e)=>{ onPlace(e); }, {passive:true});
+
+  function onPlace(ev){
+    if(over) return;
+    const p = xyFromEvent(ev);
+    if(!p) return;
+    if(board[p.y][p.x]!==EMPTY) return;
+    if(mode==='cpu' && turn!==human) return;
+    place(p.x, p.y, turn);
+    if(checkWinAt(p.x, p.y, turn)){ over = true; winLine = getLine(p.x,p.y,turn); updateStatus(true); draw(); return; }
+    switchTurn();
+    updateStatus();
+    draw();
+    if(mode==='cpu' && !over){
+      setTimeout(aiMove, 60);
+    }
+  }
+
+  function place(x,y,c){ board[y][x]=c; moves.push({x,y,c}); }
+  function unplace(){
+    const m = moves.pop();
+    if(!m) return;
+    board[m.y][m.x]=EMPTY;
+    winLine=null; over=false;
+    turn = m.c;
+  }
+  function switchTurn(){ turn = (turn===BLACK)?WHITE:BLACK; }
+
+  function updateStatus(win=false){
+    if(over || win){
+      const winner = (turn===BLACK)?'黒':'白';
+      status.textContent = `勝者：${winner}！ おめでとう`;
+    } else {
+      const player = (turn===BLACK)?'黒':'白';
+      if(mode==='cpu'){
+        const you = (human===turn) ? 'あなた' : 'CPU';
+        status.textContent = `手番：${you}（${player}）`;
+      } else {
+        status.textContent = `手番：${player}`;
+      }
+    }
+  }
+
+  function checkWinAt(x,y,c){
+    const dirs = [[1,0],[0,1],[1,1],[1,-1]];
+    for(const [dx,dy] of dirs){
+      let cnt = 1;
+      cnt += countDir(x,y,dx,dy,c);
+      cnt += countDir(x,y,-dx,-dy,c);
+      if(cnt>=WIN) return true;
+    }
+    return false;
+  }
+  function countDir(x,y,dx,dy,c){
+    let k=0, nx=x+dx, ny=y+dy;
+    while(nx>=0 && nx<N && ny>=0 && ny<N && board[ny][nx]===c){ k++; nx+=dx; ny+=dy; }
+    return k;
+  }
+  function getLine(x,y,c){
+    const dirs = [[1,0],[0,1],[1,1],[1,-1]];
+    for(const [dx,dy] of dirs){
+      let line=[{x,y}];
+      let nx=x+dx, ny=y+dy;
+      while(nx>=0&&nx<N&&ny>=0&&ny<N && board[ny][nx]===c){ line.push({x:nx,y:ny}); nx+=dx; ny+=dy; }
+      nx=x-dx; ny=y-dy;
+      while(nx>=0&&nx<N&&ny>=0&&ny<N && board[ny][nx]===c){ line.unshift({x:nx,y:ny}); nx-=dx; ny-=dy; }
+      if(line.length>=WIN) return line.slice(0,WIN);
+    }
+    return null;
+  }
+
+  function aiMove(){
+    if(over) return;
+    const best = findBestMove(ai);
+    if(!best) return;
+    place(best.x, best.y, ai);
+    if(checkWinAt(best.x, best.y, ai)){ over=true; winLine = getLine(best.x,best.y,ai); updateStatus(true); draw(); return; }
+    switchTurn();
+    updateStatus();
+    draw();
+  }
+
+  function findBestMove(color){
+    if(moves.length===0){
+      return {x: Math.floor(N/2), y: Math.floor(N/2), score:0};
+    }
+    const cand = candidates(2);
+    let best=null, bestScore=-1e18;
+    for(const p of cand){
+      if(board[p.y][p.x]!==EMPTY) continue;
+      const off = evaluatePoint(p.x, p.y, color);
+      const def = evaluatePoint(p.x, p.y, opp(color)) * 0.99;
+      const s = off + def;
+      if(s > bestScore){ bestScore = s; best = {x:p.x, y:p.y, score:s}; }
+    }
+    return best;
+  }
+
+  function candidates(radius=2){
+    const set = new Set();
+    let has=false;
+    for(let y=0;y<N;y++) for(let x=0;x<N;x++){
+      if(board[y][x]!==EMPTY){
+        has=true;
+        for(let dy=-radius;dy<=radius;dy++) for(let dx=-radius;dx<=radius;dx++){
+          const nx=x+dx, ny=y+dy;
+          if(nx<0||ny<0||nx>=N||ny>=N) continue;
+          if(board[ny][nx]===EMPTY) set.add(ny*100+nx);
+        }
+      }
+    }
+    if(!has){ return [{x:Math.floor(N/2),y:Math.floor(N/2)}]; }
+    return [...set].map(v=>({x:v%100, y:Math.floor(v/100)}));
+  }
+
+  function evaluatePoint(x,y,color){
+    let total = 0;
+    const dirs = [[1,0],[0,1],[1,1],[1,-1]];
+    for(const [dx,dy] of dirs){
+      total += scoreLine(x,y,dx,dy,color);
+    }
+    if(lineCount(x,y,color)>=WIN) total += 1e9;
+    if(lineCount(x,y,opp(color))>=WIN) total += 9e8;
+    return total;
+  }
+  function lineCount(x,y,color){
+    let best=1;
+    const dirs=[[1,0],[0,1],[1,1],[1,-1]];
+    for(const [dx,dy] of dirs){
+      let cnt = 1 + countDirPlace(x,y,dx,dy,color) + countDirPlace(x,y,-dx,-dy,color);
+      if(cnt>best) best=cnt;
+    }
+    return best;
+  }
+  function countDirPlace(x,y,dx,dy,color){
+    let k=0, nx=x+dx, ny=y+dy;
+    while(nx>=0 && nx<N && ny>=0 && ny<N && board[ny][nx]===color){ k++; nx+=dx; ny+=dy; }
+    return k;
+  }
+  function scoreLine(x,y,dx,dy,color){
+    let a=countSide(x,y,dx,dy,color);
+    let b=countSide(x,y,-dx,-dy,color);
+    const len = a.cnt + 1 + b.cnt;
+    let openEnds = (a.open?1:0) + (b.open?1:0);
+    if(len>=5) return 1e8;
+    if(len===4 && openEnds===2) return 1e6;
+    if(len===4 && openEnds===1) return 2e5;
+    if(len===3 && openEnds===2) return 5e4;
+    if(len===3 && openEnds===1) return 8e3;
+    if(len===2 && openEnds===2) return 1e3;
+    if(len===2 && openEnds===1) return 200;
+    if(len===1 && openEnds===2) return 50;
+    return 10;
+  }
+  function countSide(x,y,dx,dy,color){
+    let cnt=0, nx=x+dx, ny=y+dy;
+    while(nx>=0&&nx<N&&ny>=0&&ny<N && board[ny][nx]===color){ cnt++; nx+=dx; ny+=dy; }
+    const open = (nx>=0&&nx<N&&ny>=0&&ny<N && board[ny][nx]===EMPTY);
+    return {cnt, open};
+  }
+  function opp(c){ return c===BLACK?WHITE:BLACK; }
+
+  btnStart.addEventListener('click', ()=>{
+    mode = modeSel.value;
+    sideBox.style.display = (mode==='cpu') ? 'flex' : 'none';
+    if(mode==='cpu'){
+      human = parseInt(sideSel.value,10);
+      ai = (human===BLACK)?WHITE:BLACK;
+    }
+    reset();
+  });
+  sideSel.addEventListener('change', ()=>{
+    if(mode!=='cpu') return;
+    human = parseInt(sideSel.value,10);
+    ai = (human===BLACK)?WHITE:BLACK;
+    reset();
+  });
+  btnUndo.addEventListener('click', ()=>{
+    if(moves.length===0) return;
+    if(mode==='cpu'){
+      unplace();
+      if(moves.length>0) unplace();
+      turn = human;
+    } else {
+      unplace();
+      switchTurn();
+    }
+    over=false; winLine=null;
+    updateStatus();
+    draw();
+  });
+  btnGive.addEventListener('click', ()=>{
+    if(over) return;
+    over = true;
+    const winner = (turn===BLACK)?'白':'黒';
+    status.textContent = `ギブアップ！ 勝者：${winner}`;
+  });
+
+  reset();
+
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./service-worker.js').catch(console.error);
+    });
+  }
+})();
+</script>
+</body>
+</html>
